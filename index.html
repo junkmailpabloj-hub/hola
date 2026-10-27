@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cómo funciona un Java Debugger</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --txt:#e2e8f0; --mut:#94a3b8;
+          --acc:#38bdf8; --ok:#4ade80; --bp:#f87171; --cur:#fde047; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:1.4rem; }
+  header p { margin:4px 0 0; color:var(--mut); }
+  main { display:grid; grid-template-columns:1.3fr 1fr; gap:16px; padding:16px 24px; }
+  @media (max-width:850px){ main{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .panel h2 { margin:0 0 8px; font-size:.85rem; letter-spacing:.06em; text-transform:uppercase; color:var(--mut); }
+  #code { font-family:Consolas,monospace; font-size:.95rem; }
+  .line { display:flex; padding:2px 4px; border-radius:4px; cursor:pointer; white-space:pre; }
+  .line:hover { background:#27364d; }
+  .gutter { width:2.5em; color:var(--mut); display:flex; align-items:center; gap:4px; flex:none; }
+  .dot { width:10px; height:10px; border-radius:50%; background:transparent; flex:none; }
+  .line.bp .dot { background:var(--bp); }
+  .line.cur { background:#4d4413; outline:1px solid var(--cur); }
+  .line.cur::after { content:"◀ aquí"; margin-left:auto; color:var(--cur); font-size:.8rem; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  button { background:#0b1220; color:var(--txt); border:1px solid var(--line); border-radius:8px;
+           padding:8px 12px; cursor:pointer; font-size:.9rem; }
+  button:hover:not(:disabled) { border-color:var(--acc); color:var(--acc); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .state { display:inline-block; padding:2px 10px; border-radius:999px; font-size:.8rem; margin-left:8px; }
+  .running { background:#14532d; color:var(--ok); }
+  .paused { background:#4d4413; color:var(--cur); }
+  .done { background:#334155; color:var(--mut); }
+  table { width:100%; border-collapse:collapse; font-family:Consolas,monospace; font-size:.9rem; }
+  td { padding:3px 6px; border-bottom:1px solid var(--line); }
+  td.v { color:var(--ok); text-align:right; }
+  td.v.chg { animation:flash 1s; }
+  @keyframes flash { from{ background:#14532d; } to{ background:transparent; } }
+  .frame { padding:4px 8px; margin-bottom:4px; border-left:3px solid var(--acc); background:#0b1220;
+           font-family:Consolas,monospace; font-size:.9rem; animation:push .4s; }
+  @keyframes push { from{ transform:translateY(-8px); opacity:0; } to{ transform:none; opacity:1; } }
+  #diagram { display:flex; align-items:center; justify-content:space-between; gap:6px; margin:0 24px 8px; }
+  .node { flex:1; text-align:center; padding:10px 6px; background:var(--panel); border:2px solid var(--line);
+          border-radius:10px; font-size:.85rem; transition:border-color .3s, box-shadow .3s; }
+  .node b { display:block; color:var(--acc); }
+  .node.on { border-color:var(--cur); box-shadow:0 0 12px #fde04766; }
+  .arrow { color:var(--mut); font-size:1.3rem; }
+  #explain { margin:0 24px 24px; padding:14px; background:var(--panel); border-left:4px solid var(--acc);
+             border-radius:8px; min-height:3.2em; }
+  .hint { color:var(--mut); font-size:.85rem; margin:8px 24px 0; }
+  .out { font-family:Consolas,monospace; color:var(--ok); min-height:1.4em; }
+  @media (prefers-reduced-motion:reduce){ *{ animation:none !important; transition:none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐞 ¿Cómo funciona un Java Debugger?</h1>
+  <p>Pon un breakpoint (clic en una línea), pulsa Ejecutar y avanza paso a paso.</p>
+</header>
+
+<div id="diagram" aria-label="Arquitectura del depurador">
+  <div class="node" id="n-ide"><b>IDE</b>tu depurador</div>
+  <div class="arrow">⇄</div>
+  <div class="node" id="n-jdwp"><b>JDWP</b>protocolo</div>
+  <div class="arrow">⇄</div>
+  <div class="node" id="n-jvm"><b>JVM</b>tu programa</div>
+</div>
+
+<main>
+  <section class="panel">
+    <h2>Código Java <span id="state" class="state done">detenido</span></h2>
+    <div id="code"></div>
+    <div class="controls">
+      <button id="run">▶ Ejecutar (debug)</button>
+      <button id="cont" disabled>⏵ Continuar</button>
+      <button id="over" disabled>⤵ Step over</button>
+      <button id="into" disabled>↳ Step into</button>
+      <button id="outb" disabled>↰ Step out</button>
+      <button id="stop">⏹ Reiniciar</button>
+    </div>
+  </section>
+
+  <aside style="display:grid; gap:16px; align-content:start;">
+    <section class="panel"><h2>Pila de llamadas (Call stack)</h2><div id="stack"></div></section>
+    <section class="panel"><h2>Variables</h2><table id="vars"></table></section>
+    <section class="panel"><h2>Salida</h2><div class="out" id="out"></div></section>
+  </aside>
+</main>
+
+<p class="hint">¿Qué pasa por dentro? Cada acción de la botonera se convierte en un mensaje JDWP a la JVM.</p>
+<div id="explain">Pulsa «Ejecutar (debug)» para empezar.</div>
+
+<script>
+// Programa Java de ejemplo. Cada línea tiene un "efecto" simulado.
+const src = [
+  "public class Main {",                                   // 1
+  "  static int doble(int n) {",                           // 2
+  "    int r = n * 2;",                                    // 3
+  "    return r;",                                         // 4
+  "  }",                                                   // 5
+  "  public static void main(String[] args) {",            // 6
+  "    int a = 5;",                                        // 7
+  "    int b = doble(a);",                                 // 8
+  "    int c = a + b;",                                    // 9
+  "    System.out.println(c);",                            // 10
+  "  }",                                                   // 11
+  "}"                                                      // 12
+];
+
+// Traza de ejecución: línea, marco (profundidad) y cambios de variables.
+// vars se guardan por marco: main / doble
+const trace = [
+  { l:6,  d:1, stack:["main"], set:{} , msg:"La JVM arranca con main(). El depurador aún no sabe nada: solo hay breakpoints registrados." },
+  { l:7,  d:1, stack:["main"], set:{a:5}, scope:"main", msg:"Línea 7: se crea la variable a = 5 en el marco de main." },
+  { l:8,  d:1, stack:["main"], set:{}, msg:"Línea 8: se va a llamar a doble(a). Si haces Step into, entras en el método; con Step over se ejecuta entero." },
+  { l:3,  d:2, stack:["doble","main"], set:{n:5}, scope:"doble", msg:"Se apila un marco nuevo: doble(n=5). Fíjate en la pila de llamadas." },
+  { l:4,  d:2, stack:["doble","main"], set:{r:10}, scope:"doble", msg:"Línea 3 ejecutada: r = 5 * 2 = 10. El depurador lee el valor pidiéndolo a la JVM." },
+  { l:8,  d:1, stack:["main"], set:{b:10}, scope:"main", pop:true, msg:"return: se desapila doble y el resultado 10 se guarda en b." },
+  { l:9,  d:1, stack:["main"], set:{}, msg:"Línea 9: se va a calcular c = a + b." },
+  { l:10, d:1, stack:["main"], set:{c:15}, scope:"main", msg:"c vale 15 (5 + 10). Puedes cambiar variables en caliente en un IDE real." },
+  { l:11, d:1, stack:["main"], set:{}, out:"15", msg:"println ha escrito 15 en la consola." },
+  { l:null, end:true, msg:"main termina. La JVM acaba y la sesión de depuración se cierra." }
+];
+
+const $ = id => document.getElementById(id);
+let bps = new Set([8]);
+let i = -1, running = false;
+let scopes = { main:{}, doble:{} };
+
+function drawCode() {
+  $("code").innerHTML = "";
+  src.forEach((t, k) => {
+    const n = k + 1, d = document.createElement("div");
+    d.className = "line" + (bps.has(n) ? " bp" : "") + (running && i>=0 && trace[i].l === n ? " cur" : "");
+    d.innerHTML = '<span class="gutter"><span class="dot"></span>' + n + '</span>';
+    d.appendChild(document.createTextNode(t));
+    d.onclick = () => { bps.has(n) ? bps.delete(n) : bps.add(n); drawCode();
+      explain("Breakpoint " + (bps.has(n) ? "puesto" : "quitado") + " en la línea " + n + ". El IDE envía a la JVM: «avísame cuando llegues aquí» (SetBreakpoint)."); flash("n-ide","n-jdwp","n-jvm"); };
+    $("code").appendChild(d);
+  });
+}
+function flash(...ids) {
+  ["n-ide","n-jdwp","n-jvm"].forEach(x => $(x).classList.remove("on"));
+  ids.forEach((x, k) => setTimeout(() => $(x).classList.add("on"), k * 250));
+  setTimeout(() => ["n-ide","n-jdwp","n-jvm"].forEach(x => $(x).classList.remove("on")), 1400);
+}
+function explain(t) { $("explain").textContent = t; }
+function setState(s) { const e = $("state"); e.className = "state " + s;
+  e.textContent = {running:"ejecutando", paused:"pausado", done:"detenido"}[s]; }
+
+function drawVars(changed) {
+  const t = $("vars"); t.innerHTML = "";
+  const cur = i >= 0 ? trace[i] : null;
+  if (!cur || cur.end) { t.innerHTML = "<tr><td>(sin variables)</td></tr>"; return; }
+  const names = cur.stack[0];
+  const v = scopes[names] || {};
+  const keys = Object.keys(v);
+  if (!keys.length) t.innerHTML = "<tr><td>(vacío)</td></tr>";
+  keys.forEach(k => { const r = document.createElement("tr");
+    r.innerHTML = "<td>" + k + "</td><td class='v" + (changed === k ? " chg" : "") + "'>" + v[k] + "</td>"; t.appendChild(r); });
+}
+function drawStack() {
+  $("stack").innerHTML = "";
+  if (i < 0 || trace[i].end) return;
+  trace[i].stack.forEach((f, k) => { const d = document.createElement("div"); d.className = "frame";
+    d.textContent = f + (f === "main" ? "(String[] args)" : "(int n)") + "  — línea " + (k === 0 ? trace[i].l : 8);
+    $("stack").appendChild(d); });
+}
+function buttons(paused) { ["cont","over","into","outb"].forEach(b => $(b).disabled = !paused); $("run").disabled = running; }
+
+function goto_(k) {
+  if (k >= trace.length) k = trace.length - 1;
+  i = k;
+  const s = trace[i];
+  let ch = null;
+  if (s.set) Object.entries(s.set).forEach(([n, val]) => { scopes[s.scope][n] = val; ch = n; });
+  if (s.out) $("out").textContent += s.out;
+  if (s.end) { running = false; setState("done"); buttons(false); }
+  else setState("paused");
+  drawCode(); drawStack(); drawVars(ch); explain(s.msg);
+  flash("n-jvm","n-jdwp","n-ide");
+  if (!s.end) buttons(true);
+}
+function reset() {
+  i = -1; running = false; scopes = { main:{}, doble:{} };
+  $("out").textContent = ""; setState("done"); buttons(false); $("run").disabled = false;
+  drawCode(); drawStack(); drawVars(); explain("Pulsa «Ejecutar (debug)» para empezar."); }
+
+// Avanza hasta el siguiente breakpoint (o hasta el final)
+function cont() {
+  setState("running"); buttons(false);
+  explain("La JVM corre libre a toda velocidad hasta el siguiente breakpoint…"); flash("n-ide","n-jdwp","n-jvm");
+  let k = i;
+  const tick = () => {
+    k++;
+    if (k >= trace.length - 1) { return goto_(trace.length - 1); }
+    if (bps.has(trace[k].l)) { return goto_(k); }
+    // aplicar efectos silenciosos
+    const s = trace[k];
+    if (s.set) Object.entries(s.set).forEach(([n, val]) => scopes[s.scope][n] = val);
+    if (s.out) $("out").textContent += s.out;
+    tick();
+  };
+  setTimeout(tick, 600);
+}
+$("run").onclick = () => { running = true; $("run").disabled = true;
+  explain("El IDE arranca la JVM con -agentlib:jdwp… y se conecta por JDWP."); flash("n-ide","n-jdwp","n-jvm");
+  i = 0; goto_(0); cont_start(); };
+function cont_start() { i = 0; cont(); }
+$("cont").onclick = cont;
+$("over").onclick = () => { // step over: salta el método si estamos a punto de entrar
+  const d = trace[i].d; let k = i + 1;
+  while (k < trace.length - 1 && trace[k].d > d) { const s = trace[k];
+    if (s.set) Object.entries(s.set).forEach(([n, v]) => scopes[s.scope][n] = v); k++; }
+  goto_(k); };
+$("into").onclick = () => goto_(i + 1);
+$("outb").onclick = () => { const d = trace[i].d; let k = i + 1;
+  while (k < trace.length - 1 && trace[k].d >= d && d > 1) { const s = trace[k];
+    if (s.set) Object.entries(s.set).forEach(([n, v]) => scopes[s.scope][n] = v); k++; }
+  goto_(k); };
+$("stop").onclick = reset;
+reset();
+</script>
+</body>
+</html>
